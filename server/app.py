@@ -1,11 +1,28 @@
 from flask import Flask, request, jsonify
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 import cv2
 import numpy as np
 import base64
 import mediapipe as mp
 import os
+import logging
+from flask_cors import CORS
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
+
+# Initialize rate limiter
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["200 per day", "50 per hour"],
+    storage_uri="memory://"
+)
 
 # Initialize MediaPipe Pose
 mp_pose = mp.solutions.pose
@@ -83,12 +100,26 @@ def process_frame(frame, exercise_type):
         print(f"Error processing frame: {e}")
         return {'reps': 0}
 
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({'status': 'healthy'}), 200
+
 @app.route('/process_frame', methods=['POST'])
+@limiter.limit("10 per second")
 def process_frame_endpoint():
     try:
         data = request.json
+        if not data or 'frame' not in data or 'exercise_type' not in data:
+            logger.warning("Invalid request data")
+            return jsonify({'error': 'Invalid request data'}), 400
+            
         frame_data = data['frame']
         exercise_type = data['exercise_type']
+        
+        if exercise_type not in ['Pushups', 'Squats', 'Bicep Curls']:
+            logger.warning(f"Invalid exercise type: {exercise_type}")
+            return jsonify({'error': 'Invalid exercise type'}), 400
         
         # Decode base64 frame
         frame_bytes = base64.b64decode(frame_data)
@@ -98,9 +129,11 @@ def process_frame_endpoint():
         # Process frame with AI model
         result = process_frame(frame, exercise_type)
         
+        logger.info(f"Successfully processed frame for {exercise_type}")
         return jsonify(result)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Error processing frame: {str(e)}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+# Vercel requires the app to be in a variable named 'app'
+# No need for app.run() as Vercel handles the server
